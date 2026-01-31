@@ -18,7 +18,7 @@ class VolETPsCorrSignals(QCAlgorithm):
 
     def initialize(self):
         self.set_start_date(2022, 3, 18)
-        self.set_end_date(2022, 6, 30)
+        self.set_end_date(2026, 1, 30)
         self.set_cash(100000)
         
         # Load CSV data - try file first, then fall back to minimal embedded data
