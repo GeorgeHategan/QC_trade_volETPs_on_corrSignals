@@ -4,16 +4,6 @@ from datetime import datetime, timedelta
 import os
 # endregion
 
-class CorrelationData(PythonData):
-    """Custom data type for reading correlation data from CSV"""
-    
-    def get_source(self, config, date, is_live):
-        # For cloud, we'll embed data directly - this won't be called in our implementation
-        return SubscriptionDataSource("", SubscriptionTransportMedium.REST)
-    
-    def reader(self, config, line, date, is_live):
-        return None
-
 
 class VolETPsCorrSignals(QCAlgorithm):
     """
