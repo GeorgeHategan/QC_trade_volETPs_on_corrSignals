@@ -40,8 +40,12 @@ class VolETPsCorrSignals(QCAlgorithm):
         self.debug(f"[INIT] COR1M data: {len(self.cor1m_hourly_data)} hourly entries")
         self.debug(f"[INIT] COR3M data: {len(self.cor3m_hourly_data)} hourly entries")
         
-        # Add trading instrument
-        self.vxx = self.add_equity("VXX", Resolution.DAILY).symbol
+        # Add trading instrument with HOURLY resolution for intraday trading
+        self.vxx = self.add_equity("VXX", Resolution.HOURLY).symbol
+        
+        # Add correlation signals as custom data with HOURLY resolution
+        self.cor1m = self.add_data("COR1M", Resolution.HOURLY).symbol
+        self.cor3m = self.add_data("COR3M", Resolution.HOURLY).symbol
         
         # Indicators
         self.rsi_diff = RelativeStrengthIndex(14)
