@@ -60,13 +60,21 @@ class VolETPsCorrSignals(QCAlgorithm):
         """Load CSV data from file into a dictionary indexed by date"""
         data = {}
         try:
+            self.debug(f"[DATA LOAD] Attempting to load: {filepath}")
+            
             if not os.path.exists(filepath):
-                self.debug(f"WARNING: File not found: {filepath}")
+                self.debug(f"[ERROR] File not found: {filepath}")
+                self.debug(f"[DEBUG] Working directory: {os.getcwd()}")
                 return data
+            
+            self.debug(f"[DATA LOAD] File found! Reading...")
             
             with open(filepath, 'r') as f:
                 lines = f.readlines()
-                for line in lines[1:]:  # Skip header
+                self.debug(f"[DATA LOAD] Total lines: {len(lines)}")
+                
+                valid_rows = 0
+                for line_num, line in enumerate(lines[1:], start=2):
                     if not line.strip():
                         continue
                     parts = line.strip().split(',')
@@ -74,7 +82,6 @@ class VolETPsCorrSignals(QCAlgorithm):
                         continue
                     try:
                         time_str = parts[0].strip()
-                        # Parse ISO8601 timestamp
                         dt = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
                         date_key = dt.date()
                         
@@ -86,10 +93,19 @@ class VolETPsCorrSignals(QCAlgorithm):
                             'low': float(parts[3]),
                             'close': close_price
                         }
+                        valid_rows += 1
+                        
+                        if valid_rows % 500 == 0:
+                            self.debug(f"[DATA LOAD] Processed {valid_rows} rows...")
                     except Exception as e:
                         continue
+                
+                self.debug(f"[DATA LOAD] ✓ SUCCESS: {valid_rows} rows loaded")
+                if len(data) > 0:
+                    dates = sorted(data.keys())
+                    self.debug(f"[DATA LOAD] Date range: {dates[0]} → {dates[-1]}")
         except Exception as e:
-            self.debug(f"Error loading {filepath}: {str(e)}")
+            self.debug(f"[ERROR] Failed to load {filepath}: {str(e)}")
         
         return data
 
@@ -126,21 +142,23 @@ class VolETPsCorrSignals(QCAlgorithm):
                     break
         
         if cor1m_value is None or cor3m_value is None:
-            self.debug(f"{self.time.date()}: Missing correlation data")
+            self.debug(f"[ON_DATA] {self.time.date()}: ✗ MISSING - COR1M:{cor1m_value} COR3M:{cor3m_value}")
             return
+        
+        self.debug(f"[ON_DATA] {self.time.date()}: ✓ DATA ACCESSED - COR1M={cor1m_value:.2f} | COR3M={cor3m_value:.2f}")
         
         # Calculate difference and update RSI
         diff = cor1m_value - cor3m_value
         self.rsi_diff.update(self.time, diff)
         
         if not self.rsi_diff.is_ready:
-            self.debug(f"Warming up RSI... {self.time.date()}")
+            self.debug(f"[RSI WARMUP] {self.time.date()}: RSI initializing... Diff={diff:.4f}")
             return
         
         rsi_value = self.rsi_diff.current.value
         
         # Debug output
-        self.debug(f"{self.time.date()}: COR1M={cor1m_value:.2f}, COR3M={cor3m_value:.2f}, Diff={diff:.4f}, RSI={rsi_value:.2f}, VXX={vxx_price:.2f}")
+        self.debug(f"[SIGNAL] {self.time.date()}: COR1M={cor1m_value:.2f} | COR3M={cor3m_value:.2f} | Diff={diff:.4f} | RSI={rsi_value:.2f} | VXX={vxx_price:.2f} | Pos={'SHORT' if self.is_short else 'FLAT'}")
         
         # Entry: RSI oversold (< 50) - reversal signal to short vol
         if not self.is_short and rsi_value < self.rsi_threshold:
@@ -148,16 +166,25 @@ class VolETPsCorrSignals(QCAlgorithm):
             self.is_short = True
             self.entry_price = vxx_price
             self.trade_count += 1
-            self.debug(f"TRADE #{self.trade_count} ENTRY: Short VXX at {vxx_price:.2f}, RSI={rsi_value:.2f}")
+            self.debug(f"[TRADE {self.trade_count}] ▼ ENTRY @ {self.time.date()}: SHORT VXX @ {vxx_price:.2f} | RSI={rsi_value:.2f}<{self.rsi_threshold} | Diff={diff:.4f}")
         
         # Exit: VXX rises above threshold or RSI recovers
         elif self.is_short and (vxx_price > self.vxx_close_threshold or rsi_value > 60):
+            exit_reason = f"VXX={vxx_price:.2f}>{self.vxx_close_threshold}" if vxx_price > self.vxx_close_threshold else f"RSI={rsi_value:.2f}>60"
             self.liquidate(self.vxx)
             self.is_short = False
             profit = self.entry_price - vxx_price
             profit_pct = (profit / self.entry_price) * 100
-            self.debug(f"TRADE #{self.trade_count} EXIT: Close at {vxx_price:.2f}, P/L: {profit:.2f} ({profit_pct:.1f}%)")
+            self.debug(f"[TRADE {self.trade_count}] ▲ EXIT @ {self.time.date()}: CLOSE @ {vxx_price:.2f} | {exit_reason} | P/L: {profit:.2f} ({profit_pct:.1f}%)")
     
     def on_end_of_algorithm(self):
         """Called at the end of the algorithm"""
-        self.debug(f"Algorithm Complete. Total trades: {self.trade_count}, Final Portfolio: {self.portfolio.total_portfolio_value:.2f}")
+        self.debug(f"\n{'='*90}")
+        self.debug(f"[FINAL SUMMARY]")
+        self.debug(f"[FINAL] Algorithm ended: {self.time.date()}")
+        self.debug(f"[FINAL] Total trades executed: {self.trade_count}")
+        self.debug(f"[FINAL] COR1M data points: {len(self.cor1m_data)} rows")
+        self.debug(f"[FINAL] COR3M data points: {len(self.cor3m_data)} rows")
+        self.debug(f"[FINAL] Portfolio value: ${self.portfolio.total_portfolio_value:.2f}")
+        self.debug(f"[FINAL] Cash remaining: ${self.portfolio.cash:.2f}")
+        self.debug(f"{'='*90}\n")
