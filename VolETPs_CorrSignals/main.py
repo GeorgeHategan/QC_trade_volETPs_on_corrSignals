@@ -1669,40 +1669,31 @@ class VolETPsCorrSignals(QCAlgorithm):
             return
         
         current_date = self.time.date()
-        current_hour = self.time.hour
         
-        # Build hourly timestamp key in ISO format for lookup
-        current_dt = datetime(current_date.year, current_date.month, current_date.day, current_hour, 0, 0)
-        current_hour_key = current_dt.isoformat()
-        
-        # Get correlation data for this hour (from hourly data)
+        # Get correlation data for today (from daily cache, not hourly lookup to avoid lag)
         cor1m_value = None
         cor3m_value = None
         
-        # Try exact hourly match first
-        if current_hour_key in self.cor1m_hourly_data:
-            cor1m_value = self.cor1m_hourly_data[current_hour_key]['close']
-        if current_hour_key in self.cor3m_hourly_data:
-            cor3m_value = self.cor3m_hourly_data[current_hour_key]['close']
+        if current_date in self.cor1m_data:
+            cor1m_value = self.cor1m_data[current_date]['close']
+        if current_date in self.cor3m_data:
+            cor3m_value = self.cor3m_data[current_date]['close']
         
-        # If we don't have this hour's data, try to use the most recent available
+        # If we don't have today's data, try most recent available (max 10 days back)
         if cor1m_value is None or cor3m_value is None:
-            # Find closest hour (search backwards up to 24 hours)
-            for hour_offset in range(1, 25):
-                check_dt = current_dt - timedelta(hours=hour_offset)
-                check_hour_key = check_dt.isoformat()
-                if cor1m_value is None and check_hour_key in self.cor1m_hourly_data:
-                    cor1m_value = self.cor1m_hourly_data[check_hour_key]['close']
-                if cor3m_value is None and check_hour_key in self.cor3m_hourly_data:
-                    cor3m_value = self.cor3m_hourly_data[check_hour_key]['close']
+            for day_offset in range(1, 11):
+                check_date = current_date - timedelta(days=day_offset)
+                if cor1m_value is None and check_date in self.cor1m_data:
+                    cor1m_value = self.cor1m_data[check_date]['close']
+                if cor3m_value is None and check_date in self.cor3m_data:
+                    cor3m_value = self.cor3m_data[check_date]['close']
                 if cor1m_value and cor3m_value:
                     break
         
         if cor1m_value is None or cor3m_value is None:
-            self.debug(f"[ON_DATA] {self.time}: ✗ MISSING - COR1M:{cor1m_value} COR3M:{cor3m_value}")
-            return
+            return  # Skip this bar silently if no correlation data
         
-        self.debug(f"[ON_DATA] {self.time}: ✓ DATA ACCESSED - COR1M={cor1m_value:.2f} | COR3M={cor3m_value:.2f}")
+        self.debug(f"[ON_DATA] {self.time}: ✓ COR1M={cor1m_value:.2f} | COR3M={cor3m_value:.2f}")
         
         # Calculate difference and update RSI
         diff = cor1m_value - cor3m_value
