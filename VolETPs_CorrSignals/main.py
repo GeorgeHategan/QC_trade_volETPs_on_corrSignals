@@ -46,8 +46,10 @@ class VolETPsCorrSignals(QCAlgorithm):
         # Correlation data loaded from CSV/embedded - no need for separate data feeds
         # Signals will be generated hourly based on loaded correlation data
         
-        # Indicators
-        self.rsi_diff = RelativeStrengthIndex(14)
+        # Manual RSI tracking (avoid indicator generic method issues)
+        self.rsi_period = 14
+        self.price_history = []  # Store price differences for RSI calculation
+        self.rsi_value = 50  # Default middle value
         
         # Parameters
         self.rsi_threshold = 50
@@ -1695,15 +1697,28 @@ class VolETPsCorrSignals(QCAlgorithm):
         
         self.debug(f"[ON_DATA] {self.time}: ✓ COR1M={cor1m_value:.2f} | COR3M={cor3m_value:.2f}")
         
-        # Calculate difference and update RSI
+        # Calculate difference and update RSI manually
         diff = cor1m_value - cor3m_value
-        self.rsi_diff.update(self.time, diff)
+        self.price_history.append(diff)
         
-        if not self.rsi_diff.is_ready:
-            self.debug(f"[RSI WARMUP] {self.time.date()}: RSI initializing... Diff={diff:.4f}")
-            return
+        # Keep only last N periods for RSI calculation
+        if len(self.price_history) > self.rsi_period + 1:
+            self.price_history.pop(0)
         
-        rsi_value = self.rsi_diff.current.value
+        # Calculate RSI if we have enough data
+        if len(self.price_history) >= self.rsi_period:
+            gains = sum(max(0, self.price_history[i] - self.price_history[i-1]) for i in range(1, len(self.price_history)))
+            losses = sum(max(0, self.price_history[i-1] - self.price_history[i]) for i in range(1, len(self.price_history)))
+            
+            if losses == 0:
+                self.rsi_value = 100
+            else:
+                rs = gains / losses
+                self.rsi_value = 100 - (100 / (1 + rs))
+        else:
+            return  # Not enough data yet
+        
+        rsi_value = self.rsi_value
         
         # Debug output
         self.debug(f"[SIGNAL] {self.time.date()}: COR1M={cor1m_value:.2f} | COR3M={cor3m_value:.2f} | Diff={diff:.4f} | RSI={rsi_value:.2f} | VXX={vxx_price:.2f} | Pos={'SHORT' if self.is_short else 'FLAT'}")
