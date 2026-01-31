@@ -22,19 +22,23 @@ class VolETPsCorrSignals(QCAlgorithm):
         self.set_end_date(2026, 1, 30)
         self.set_cash(100000)
         
+        # Initialize hourly data dictionaries
+        self.cor1m_hourly_data = {}
+        self.cor3m_hourly_data = {}
+        
         # Load CSV data - try file first, then fall back to minimal embedded data
         self.debug(f"[INIT] Working directory: {os.getcwd()}")
-        self.cor1m_data = self._load_csv_data("data/custom/cor1m.csv")
-        self.cor3m_data = self._load_csv_data("data/custom/cor3m.csv")
+        self._load_csv_data("data/custom/cor1m.csv")
+        self._load_csv_data("data/custom/cor3m.csv")
         
         # If no files found, create minimal embedded fallback data
         # This ensures cloud backtesting works even without files
-        if not self.cor1m_data or len(self.cor1m_data) == 0:
+        if not self.cor1m_hourly_data or len(self.cor1m_hourly_data) == 0:
             self.debug(f"[INIT] ✗ No CSV files found - using embedded fallback data")
             self._load_embedded_data()
         
-        self.debug(f"[INIT] COR1M data: {len(self.cor1m_data)} rows")
-        self.debug(f"[INIT] COR3M data: {len(self.cor3m_data)} rows")
+        self.debug(f"[INIT] COR1M data: {len(self.cor1m_hourly_data)} hourly entries")
+        self.debug(f"[INIT] COR3M data: {len(self.cor3m_hourly_data)} hourly entries")
         
         # Add trading instrument
         self.vxx = self.add_equity("VXX", Resolution.DAILY).symbol
@@ -55,17 +59,19 @@ class VolETPsCorrSignals(QCAlgorithm):
         self.last_cor3m = None
     
     def _load_csv_data(self, filepath):
-        """Load CSV data from file into a dictionary indexed by date"""
-        data = {}
+        """Load CSV data from file into a dictionary - stores HOURLY data with datetime keys"""
+        hourly_data = {}
+        daily_data = {}
+        
         try:
             self.debug(f"[DATA LOAD] Attempting to load: {filepath}")
             
             if not os.path.exists(filepath):
                 self.debug(f"[ERROR] File not found: {filepath}")
                 self.debug(f"[DEBUG] Working directory: {os.getcwd()}")
-                return data
+                return hourly_data
             
-            self.debug(f"[DATA LOAD] File found! Reading...")
+            self.debug(f"[DATA LOAD] File found! Reading hourly data...")
             
             with open(filepath, 'r') as f:
                 lines = f.readlines()
@@ -80,32 +86,48 @@ class VolETPsCorrSignals(QCAlgorithm):
                         continue
                     try:
                         time_str = parts[0].strip()
-                        dt = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
-                        date_key = dt.date()
+                        # Parse ISO8601 timestamp with timezone
+                        dt_str = time_str.split('+')[0] if '+' in time_str else time_str.split('Z')[0]
+                        dt = datetime.fromisoformat(dt_str)
                         
-                        close_price = float(parts[4])
-                        data[date_key] = {
+                        # Use ISO format as key to preserve hourly granularity
+                        hour_key = dt.isoformat()
+                        ohlc = {
                             'time': dt,
                             'open': float(parts[1]),
                             'high': float(parts[2]),
                             'low': float(parts[3]),
-                            'close': close_price
+                            'close': float(parts[4])
                         }
+                        hourly_data[hour_key] = ohlc
+                        
+                        # Also keep daily data (last OHLC of day for backward compatibility)
+                        date_key = dt.date()
+                        daily_data[date_key] = ohlc
+                        
                         valid_rows += 1
                         
                         if valid_rows % 500 == 0:
-                            self.debug(f"[DATA LOAD] Processed {valid_rows} rows...")
+                            self.debug(f"[DATA LOAD] Processed {valid_rows} hourly bars...")
                     except Exception as e:
                         continue
                 
-                self.debug(f"[DATA LOAD] ✓ SUCCESS: {valid_rows} rows loaded")
-                if len(data) > 0:
-                    dates = sorted(data.keys())
-                    self.debug(f"[DATA LOAD] Date range: {dates[0]} → {dates[-1]}")
+                self.debug(f"[DATA LOAD] ✓ SUCCESS: {valid_rows} hourly entries loaded")
+                if len(hourly_data) > 0:
+                    times = sorted(hourly_data.keys())
+                    self.debug(f"[DATA LOAD] Time range: {times[0]} → {times[-1]}")
         except Exception as e:
             self.debug(f"[ERROR] Failed to load {filepath}: {str(e)}")
         
-        return data
+        # Store both hourly and daily data on self
+        if filepath.endswith('cor1m.csv'):
+            self.cor1m_hourly_data = hourly_data
+            self.cor1m_data = daily_data
+        elif filepath.endswith('cor3m.csv'):
+            self.cor3m_hourly_data = hourly_data
+            self.cor3m_data = daily_data
+        
+        return hourly_data
     
     def _load_embedded_data(self):
         """Load minimal embedded fallback data for cloud compatibility"""
@@ -1591,28 +1613,42 @@ class VolETPsCorrSignals(QCAlgorithm):
         # Convert string dates to date objects and create OHLC structure to match CSV format
         self.cor1m_data = {}
         self.cor3m_data = {}
+        self.cor1m_hourly_data = {}
+        self.cor3m_hourly_data = {}
         
         for date_str, close_val in sample_cor1m_raw.items():
             date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
             # Add small variance to create OHLC from close price
-            self.cor1m_data[date_obj] = {
+            ohlc = {
                 'close': close_val,
                 'open': close_val * 0.999,
                 'high': close_val * 1.001,
                 'low': close_val * 0.998
             }
+            self.cor1m_data[date_obj] = ohlc
+            
+            # Create hourly entry (16:00 UTC as representative hour)
+            dt = datetime.combine(date_obj, datetime.min.time()).replace(hour=16)
+            hour_key = dt.isoformat()
+            self.cor1m_hourly_data[hour_key] = ohlc
         
         for date_str, close_val in sample_cor3m_raw.items():
             date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
             # Add small variance to create OHLC from close price
-            self.cor3m_data[date_obj] = {
+            ohlc = {
                 'close': close_val,
                 'open': close_val * 0.999,
                 'high': close_val * 1.001,
                 'low': close_val * 0.998
             }
+            self.cor3m_data[date_obj] = ohlc
+            
+            # Create hourly entry (16:00 UTC as representative hour)
+            dt = datetime.combine(date_obj, datetime.min.time()).replace(hour=16)
+            hour_key = dt.isoformat()
+            self.cor3m_hourly_data[hour_key] = ohlc
         
-        self.debug(f"[DATA LOAD] ✓ Loaded {len(self.cor1m_data)} embedded COR1M and {len(self.cor3m_data)} embedded COR3M entries")
+        self.debug(f"[DATA LOAD] ✓ Loaded {len(self.cor1m_hourly_data)} embedded COR1M and {len(self.cor3m_hourly_data)} embedded COR3M entries")
 
     def on_data(self, data: Slice):
         """Main algorithm logic"""
@@ -1630,34 +1666,40 @@ class VolETPsCorrSignals(QCAlgorithm):
             return
         
         current_date = self.time.date()
+        current_hour = self.time.hour
         
-        # Get correlation data for today
+        # Build hourly timestamp key in ISO format for lookup
+        current_dt = datetime(current_date.year, current_date.month, current_date.day, current_hour, 0, 0)
+        current_hour_key = current_dt.isoformat()
+        
+        # Get correlation data for this hour (from hourly data)
         cor1m_value = None
         cor3m_value = None
         
-        if current_date in self.cor1m_data:
-            cor1m_value = self.cor1m_data[current_date]['close']
-        if current_date in self.cor3m_data:
-            cor3m_value = self.cor3m_data[current_date]['close']
+        # Try exact hourly match first
+        if current_hour_key in self.cor1m_hourly_data:
+            cor1m_value = self.cor1m_hourly_data[current_hour_key]['close']
+        if current_hour_key in self.cor3m_hourly_data:
+            cor3m_value = self.cor3m_hourly_data[current_hour_key]['close']
         
-        # If we don't have today's data, try to use the most recent available
+        # If we don't have this hour's data, try to use the most recent available
         if cor1m_value is None or cor3m_value is None:
-            # Find closest date
-            for offset in range(1, 10):
-                check_date = datetime(current_date.year, current_date.month, current_date.day) - timedelta(days=offset)
-                check_date = check_date.date()
-                if cor1m_value is None and check_date in self.cor1m_data:
-                    cor1m_value = self.cor1m_data[check_date]['close']
-                if cor3m_value is None and check_date in self.cor3m_data:
-                    cor3m_value = self.cor3m_data[check_date]['close']
+            # Find closest hour (search backwards up to 24 hours)
+            for hour_offset in range(1, 25):
+                check_dt = current_dt - timedelta(hours=hour_offset)
+                check_hour_key = check_dt.isoformat()
+                if cor1m_value is None and check_hour_key in self.cor1m_hourly_data:
+                    cor1m_value = self.cor1m_hourly_data[check_hour_key]['close']
+                if cor3m_value is None and check_hour_key in self.cor3m_hourly_data:
+                    cor3m_value = self.cor3m_hourly_data[check_hour_key]['close']
                 if cor1m_value and cor3m_value:
                     break
         
         if cor1m_value is None or cor3m_value is None:
-            self.debug(f"[ON_DATA] {self.time.date()}: ✗ MISSING - COR1M:{cor1m_value} COR3M:{cor3m_value}")
+            self.debug(f"[ON_DATA] {self.time}: ✗ MISSING - COR1M:{cor1m_value} COR3M:{cor3m_value}")
             return
         
-        self.debug(f"[ON_DATA] {self.time.date()}: ✓ DATA ACCESSED - COR1M={cor1m_value:.2f} | COR3M={cor3m_value:.2f}")
+        self.debug(f"[ON_DATA] {self.time}: ✓ DATA ACCESSED - COR1M={cor1m_value:.2f} | COR3M={cor3m_value:.2f}")
         
         # Calculate difference and update RSI
         diff = cor1m_value - cor3m_value
