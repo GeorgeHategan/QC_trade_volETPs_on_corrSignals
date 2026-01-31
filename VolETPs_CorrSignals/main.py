@@ -44,9 +44,12 @@ class VolETPsCorrSignals(QCAlgorithm):
         self.cor1m_data = {}  # Daily cache for fast lookup
         self.cor3m_data = {}
         
+        # GitHub raw URLs for cloud compatibility
+        self.GITHUB_BASE_URL = "https://raw.githubusercontent.com/GeorgeHategan/QC_trade_volETPs_on_corrSignals/main"
+        
         self.debug("[INIT] Loading correlation data...")
-        self._load_csv_data("data/custom/cor1m.csv")
-        self._load_csv_data("data/custom/cor3m.csv")
+        self._load_csv_data("cor1m")
+        self._load_csv_data("cor3m")
         
         self.debug(f"[INIT] COR1M: {len(self.cor1m_hourly_data)} hourly entries")
         self.debug(f"[INIT] COR3M: {len(self.cor3m_hourly_data)} hourly entries")
@@ -162,72 +165,90 @@ class VolETPsCorrSignals(QCAlgorithm):
             summary_line += f" | avg_hold={avg_hold:.1f}h"
         self.debug(summary_line)
     
-    def _load_csv_data(self, filepath):
-        """Load CSV data from file into a dictionary - stores HOURLY data with datetime keys"""
+    def _load_csv_data(self, data_name):
+        """Load CSV data from GitHub (cloud) or local file (fallback) - stores HOURLY data with datetime keys"""
         hourly_data = {}
         daily_data = {}
         
         try:
-            self.debug(f"[DATA LOAD] Attempting to load: {filepath}")
+            self.debug(f"[DATA LOAD] Loading {data_name} data...")
             
-            if not os.path.exists(filepath):
-                self.debug(f"[ERROR] File not found: {filepath}")
-                self.debug(f"[DEBUG] Working directory: {os.getcwd()}")
-                return hourly_data
+            # Try downloading from GitHub first (works in cloud and locally)
+            github_url = f"{self.GITHUB_BASE_URL}/data/custom/{data_name}.csv"
+            local_path = f"data/custom/{data_name}.csv"
             
-            self.debug(f"[DATA LOAD] File found! Reading hourly data...")
+            content = None
+            try:
+                self.debug(f"[DATA LOAD] Downloading from: {github_url}")
+                content = self.download(github_url)
+                if content and len(content) > 100:
+                    self.debug(f"[DATA LOAD] Downloaded {len(content)} bytes from GitHub")
+                else:
+                    content = None
+            except Exception as e:
+                self.debug(f"[DATA LOAD] GitHub download failed: {str(e)}")
+                content = None
             
-            with open(filepath, 'r') as f:
-                lines = f.readlines()
-                self.debug(f"[DATA LOAD] Total lines: {len(lines)}")
-                
-                valid_rows = 0
-                for line_num, line in enumerate(lines[1:], start=2):
-                    if not line.strip():
-                        continue
-                    parts = line.strip().split(',')
-                    if len(parts) < 5:
-                        continue
-                    try:
-                        time_str = parts[0].strip()
-                        # Parse ISO8601 timestamp with timezone
-                        dt_str = time_str.split('+')[0] if '+' in time_str else time_str.split('Z')[0]
-                        dt = datetime.fromisoformat(dt_str)
-                        
-                        # Use ISO format as key to preserve hourly granularity
-                        hour_key = dt.isoformat()
-                        ohlc = {
-                            'time': dt,
-                            'open': float(parts[1]),
-                            'high': float(parts[2]),
-                            'low': float(parts[3]),
-                            'close': float(parts[4])
-                        }
-                        hourly_data[hour_key] = ohlc
-                        
-                        # Also keep daily data (last OHLC of day for backward compatibility)
-                        date_key = dt.date()
-                        daily_data[date_key] = ohlc
-                        
-                        valid_rows += 1
-                        
-                        if valid_rows % 500 == 0:
-                            self.debug(f"[DATA LOAD] Processed {valid_rows} hourly bars...")
-                    except Exception as e:
-                        continue
-                
-                self.debug(f"[DATA LOAD] ✓ SUCCESS: {valid_rows} hourly entries loaded")
-                if len(hourly_data) > 0:
-                    times = sorted(hourly_data.keys())
-                    self.debug(f"[DATA LOAD] Time range: {times[0]} → {times[-1]}")
+            # Fallback to local file if download failed
+            if not content:
+                if os.path.exists(local_path):
+                    self.debug(f"[DATA LOAD] Using local file: {local_path}")
+                    with open(local_path, 'r') as f:
+                        content = f.read()
+                else:
+                    self.debug(f"[ERROR] No data available for {data_name}")
+                    return hourly_data
+            
+            lines = content.strip().split('\n')
+            self.debug(f"[DATA LOAD] Total lines: {len(lines)}")
+            
+            valid_rows = 0
+            for line_num, line in enumerate(lines[1:], start=2):
+                if not line.strip():
+                    continue
+                parts = line.strip().split(',')
+                if len(parts) < 5:
+                    continue
+                try:
+                    time_str = parts[0].strip()
+                    # Parse ISO8601 timestamp with timezone
+                    dt_str = time_str.split('+')[0] if '+' in time_str else time_str.split('Z')[0]
+                    dt = datetime.fromisoformat(dt_str)
+                    
+                    # Use ISO format as key to preserve hourly granularity
+                    hour_key = dt.isoformat()
+                    ohlc = {
+                        'time': dt,
+                        'open': float(parts[1]),
+                        'high': float(parts[2]),
+                        'low': float(parts[3]),
+                        'close': float(parts[4])
+                    }
+                    hourly_data[hour_key] = ohlc
+                    
+                    # Also keep daily data (last OHLC of day for backward compatibility)
+                    date_key = dt.date()
+                    daily_data[date_key] = ohlc
+                    
+                    valid_rows += 1
+                    
+                    if valid_rows % 500 == 0:
+                        self.debug(f"[DATA LOAD] Processed {valid_rows} hourly bars...")
+                except Exception as e:
+                    continue
+            
+            self.debug(f"[DATA LOAD] ✓ SUCCESS: {valid_rows} hourly entries loaded")
+            if len(hourly_data) > 0:
+                times = sorted(hourly_data.keys())
+                self.debug(f"[DATA LOAD] Time range: {times[0]} → {times[-1]}")
         except Exception as e:
-            self.debug(f"[ERROR] Failed to load {filepath}: {str(e)}")
+            self.debug(f"[ERROR] Failed to load {data_name}: {str(e)}")
         
         # Store both hourly and daily data on self
-        if filepath.endswith('cor1m.csv'):
+        if data_name == 'cor1m':
             self.cor1m_hourly_data = hourly_data
             self.cor1m_data = daily_data
-        elif filepath.endswith('cor3m.csv'):
+        elif data_name == 'cor3m':
             self.cor3m_hourly_data = hourly_data
             self.cor3m_data = daily_data
         
