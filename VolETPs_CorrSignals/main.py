@@ -51,6 +51,14 @@ class VolETPsCorrSignals(QCAlgorithm):
         self.debug(f"[INIT] COR1M: {len(self.cor1m_hourly_data)} hourly entries")
         self.debug(f"[INIT] COR3M: {len(self.cor3m_hourly_data)} hourly entries")
         
+        # Debug: show sample of loaded keys
+        if len(self.cor1m_hourly_data) > 0:
+            sample_keys = list(self.cor1m_hourly_data.keys())[:5]
+            self.debug(f"[INIT] COR1M sample keys: {sample_keys}")
+        if len(self.cor3m_hourly_data) > 0:
+            sample_keys = list(self.cor3m_hourly_data.keys())[:5]
+            self.debug(f"[INIT] COR3M sample keys: {sample_keys}")
+        
         # === INSTRUMENT SUBSCRIPTION ===
         self.vxx = self.add_equity("VXX", Resolution.HOUR).symbol
         
@@ -170,20 +178,24 @@ class VolETPsCorrSignals(QCAlgorithm):
         try:
             self.debug(f"[DATA LOAD] Loading {data_name} data...")
             
-            object_store_key = f"{data_name}_data"
+            # Try multiple key formats for Object Store
+            possible_keys = [f"{data_name}_data", f"/{data_name}_data", f"{data_name}.csv", f"/{data_name}.csv"]
             local_path = f"data/custom/{data_name}.csv"
             
             content = None
             
             # Try Object Store first (for cloud compatibility)
-            try:
-                if self.object_store.contains_key(object_store_key):
-                    self.debug(f"[DATA LOAD] Loading from Object Store: {object_store_key}")
-                    content = self.object_store.read(object_store_key)
-                    self.debug(f"[DATA LOAD] Read {len(content)} bytes from Object Store")
-            except Exception as e:
-                self.debug(f"[DATA LOAD] Object Store read failed: {str(e)}")
-                content = None
+            for object_store_key in possible_keys:
+                try:
+                    self.debug(f"[DATA LOAD] Checking Object Store key: {object_store_key}")
+                    if self.object_store.contains_key(object_store_key):
+                        self.debug(f"[DATA LOAD] Found! Loading from Object Store: {object_store_key}")
+                        content = self.object_store.read(object_store_key)
+                        self.debug(f"[DATA LOAD] Read {len(content)} bytes from Object Store")
+                        break
+                except Exception as e:
+                    self.debug(f"[DATA LOAD] Key {object_store_key} failed: {str(e)}")
+                    continue
             
             # Fallback to local file if Object Store failed
             if not content:
@@ -193,8 +205,9 @@ class VolETPsCorrSignals(QCAlgorithm):
                         content = f.read()
                     # Save to Object Store for future cloud runs
                     try:
-                        self.object_store.save(object_store_key, content)
-                        self.debug(f"[DATA LOAD] Saved to Object Store: {object_store_key}")
+                        save_key = f"{data_name}_data"
+                        self.object_store.save(save_key, content)
+                        self.debug(f"[DATA LOAD] Saved to Object Store: {save_key}")
                     except Exception as e:
                         self.debug(f"[DATA LOAD] Failed to save to Object Store: {str(e)}")
                 else:
@@ -455,6 +468,10 @@ class VolETPsCorrSignals(QCAlgorithm):
         - EXIT: Emitted on every exit with hold time, P/L, and reason
         - BLOCK: Emitted when entry signal present but blocked
         """
+        
+        # Need spread statistics to make trading decisions
+        if self.spread_ma is None or self.spread_std is None or self.spread_std == 0:
+            return
         
         # Compute trade execution state
         spread_distance = self.spread_ma - spread
