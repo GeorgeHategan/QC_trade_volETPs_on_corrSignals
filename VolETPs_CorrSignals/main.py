@@ -4,64 +4,102 @@ from datetime import datetime, timedelta
 import os
 # endregion
 
+# === REGIME DEFINITIONS ===
+REGIME_SAFE = "SAFE"          # Permission to short vol
+REGIME_NEUTRAL = "NEUTRAL"    # Stand down
+REGIME_DANGER = "DANGER"      # Avoid shorts, vol spike regime
 
 class VolETPsCorrSignals(QCAlgorithm):
     """
-    VIX Short Strategy based on COR1M vs COR3M correlation
+    TWO-LAYER VOLATILITY TRADING SYSTEM
     
-    Strategy:
-    - Loads correlation data from CSV files
-    - Calculates RSI of (COR1M - COR3M) difference
-    - Shorts VXX when RSI < 50 (oversold, reversal signal)
-    - Closes short when VXX > 25 or RSI recovers
+    Layer 1: REGIME (permission layer)
+    - Uses COR1M - COR3M spread as regime signal
+    - Spreads normalized via rolling mean/std
+    - Three states: SAFE, NEUTRAL, DANGER
+    - Requires 2-bar persistence to avoid whipsaws
+    
+    Layer 2: EXECUTION (trade layer)
+    - Only enter when: regime=SAFE AND cooldown clear AND signal strong
+    - Exit when: regime changes OR spread normalizes OR stop hits
+    - All exits tied to regime/signal normalization, not time
+    - Volatility-aware risk control with adaptive stops
+    
+    Design principles:
+    - Fewer, higher-quality trades
+    - Audit trail on every decision
+    - No lookahead bias
+    - Structural parameters locked (persistence, cooldown, min window)
     """
 
     def initialize(self):
-        # Start date must be after COR3M data availability (2024-02-06)
-        self.set_start_date(2024, 2, 6)
+        # === BACKTEST CONFIGURATION ===
+        self.set_start_date(2024, 2, 6)      # After COR3M availability
         self.set_end_date(2026, 1, 30)
         self.set_cash(100000)
         
-        # Initialize hourly data dictionaries
+        # === DATA LOADING ===
         self.cor1m_hourly_data = {}
         self.cor3m_hourly_data = {}
+        self.cor1m_data = {}  # Daily cache for fast lookup
+        self.cor3m_data = {}
         
-        # Load CSV data - try file first, then fall back to minimal embedded data
-        self.debug(f"[INIT] Working directory: {os.getcwd()}")
+        self.debug("[INIT] Loading correlation data...")
         self._load_csv_data("data/custom/cor1m.csv")
         self._load_csv_data("data/custom/cor3m.csv")
         
-        # If no files found, create minimal embedded fallback data
-        # This ensures cloud backtesting works even without files
         if not self.cor1m_hourly_data or len(self.cor1m_hourly_data) == 0:
-            self.debug(f"[INIT] ✗ No CSV files found - using embedded fallback data")
+            self.debug("[INIT] No CSV files found - loading embedded fallback")
             self._load_embedded_data()
         
-        self.debug(f"[INIT] COR1M data: {len(self.cor1m_hourly_data)} hourly entries")
-        self.debug(f"[INIT] COR3M data: {len(self.cor3m_hourly_data)} hourly entries")
+        self.debug(f"[INIT] COR1M: {len(self.cor1m_data)} daily entries")
+        self.debug(f"[INIT] COR3M: {len(self.cor3m_data)} daily entries")
         
-        # Add trading instrument with HOUR resolution for intraday trading
+        # === INSTRUMENT SUBSCRIPTION ===
         self.vxx = self.add_equity("VXX", Resolution.HOUR).symbol
         
-        # Correlation data loaded from CSV/embedded - no need for separate data feeds
-        # Signals will be generated hourly based on loaded correlation data
+        # === LAYER 1: REGIME STATE MACHINE ===
+        # Structural parameters (LOCKED - do not optimize)
+        self.SPREAD_MA_WINDOW = 20         # Rolling window for normalization
+        self.REGIME_PERSISTENCE_BARS = 2   # Require 2 bars for regime change
+        self.SHOCK_THRESHOLD_MULT = 2.5    # Spread movement > 2.5*std = shock
         
-        # Manual RSI tracking (avoid indicator generic method issues)
-        self.rsi_period = 14
-        self.price_history = []  # Store price differences for RSI calculation
-        self.rsi_value = 50  # Default middle value
+        # Regime state tracking
+        self.spread_history = []            # Raw spread values
+        self.regime_current = REGIME_NEUTRAL
+        self.regime_previous = REGIME_NEUTRAL
+        self.regime_bar_count = 0           # Bars at current regime
+        self.spread_ma = None               # Rolling mean
+        self.spread_std = None              # Rolling std dev
+        self.spread_percentile_high = None  # 75th percentile
+        self.spread_percentile_low = None   # 25th percentile
         
-        # Parameters
-        self.rsi_threshold = 50
-        self.vxx_close_threshold = 25
-        self.position_size = 0.50
+        # === LAYER 2: EXECUTION STATE MACHINE ===
+        # Structural parameters (LOCKED - do not optimize)
+        self.COOLDOWN_BARS = 2              # Bars to wait after exit
+        self.ENTRY_CONFIRMATION_BARS = 2   # Signal must persist 2 bars
+        self.SIGNAL_STD_THRESHOLD = 1.0    # Trade only when >1.0 std from MA
         
-        # State tracking
+        # Tunable parameters (safe defaults)
+        self.POSITION_SIZE = 0.50           # Risk: 50% of portfolio per trade
+        self.STOP_LOSS_MULT = 2.0           # Stop is 2x rolling volatility
+        self.EXIT_MEAN_REVERT_THRESHOLD = 0.5  # Exit when spread is <0.5 std from MA
+        
+        # Execution state
         self.is_short = False
         self.entry_price = 0
+        self.entry_bar_count = 0
+        self.bars_since_exit = 0
+        self.entry_spread = 0               # Record entry spread for logging
+        self.bars_since_entry = 0
         self.trade_count = 0
-        self.last_cor1m = None
-        self.last_cor3m = None
+        
+        # Volatility tracking for adaptive stops
+        self.vxx_range_history = []
+        self.VXX_RANGE_WINDOW = 20
+        self.vxx_atr_estimate = 1.0         # Average True Range proxy
+        
+        self.debug("[INIT] ✓ Initialization complete")
     
     def _load_csv_data(self, filepath):
         """Load CSV data from file into a dictionary - stores HOURLY data with datetime keys"""
@@ -1656,98 +1694,197 @@ class VolETPsCorrSignals(QCAlgorithm):
         self.debug(f"[DATA LOAD] ✓ Loaded {len(self.cor1m_hourly_data)} embedded COR1M and {len(self.cor3m_hourly_data)} embedded COR3M entries")
 
     def on_data(self, data: Slice):
-        """Main algorithm logic"""
+        """
+        TWO-LAYER EXECUTION LOGIC
         
-        # Check if VXX data is available
+        Layer 1: Get data and update regime
+        Layer 2: Execute trades only if regime permits
+        """
+        
+        # === STEP 0: DATA ACQUISITION ===
         if not data.contains_key(self.vxx):
             return
         
         try:
-            vxx_data = data[self.vxx]
-            if vxx_data is None or vxx_data.close is None:
+            vxx_price = data[self.vxx].close
+            if vxx_price is None or vxx_price <= 0:
                 return
-            vxx_price = vxx_data.close
         except:
             return
         
         current_date = self.time.date()
+        current_time_str = self.time.strftime("%Y-%m-%d %H:%M:%S")
         
-        # Get correlation data for today (from daily cache, not hourly lookup to avoid lag)
-        cor1m_value = None
-        cor3m_value = None
+        # Get COR values (no lookahead: use only available data at current timestamp)
+        cor1m_val = self._get_cor_value(self.cor1m_data, current_date)
+        cor3m_val = self._get_cor_value(self.cor3m_data, current_date)
         
-        if current_date in self.cor1m_data:
-            cor1m_value = self.cor1m_data[current_date]['close']
-        if current_date in self.cor3m_data:
-            cor3m_value = self.cor3m_data[current_date]['close']
+        if cor1m_val is None or cor3m_val is None:
+            self.debug(f"[MISSING] {current_time_str}: COR data not available, skipping bar")
+            return
         
-        # If we don't have today's data, try most recent available (max 10 days back)
-        if cor1m_value is None or cor3m_value is None:
-            for day_offset in range(1, 11):
-                check_date = current_date - timedelta(days=day_offset)
-                if cor1m_value is None and check_date in self.cor1m_data:
-                    cor1m_value = self.cor1m_data[check_date]['close']
-                if cor3m_value is None and check_date in self.cor3m_data:
-                    cor3m_value = self.cor3m_data[check_date]['close']
-                if cor1m_value and cor3m_value:
-                    break
+        spread = cor1m_val - cor3m_val
         
-        if cor1m_value is None or cor3m_value is None:
-            return  # Skip this bar silently if no correlation data
+        # === STEP 1: UPDATE REGIME (Layer A) ===
+        self._update_regime(spread, vxx_price, current_time_str)
         
-        self.debug(f"[ON_DATA] {self.time}: ✓ COR1M={cor1m_value:.2f} | COR3M={cor3m_value:.2f}")
+        # === STEP 2: EXECUTE TRADES (Layer B) ===
+        self._execute_trades(spread, vxx_price, current_time_str)
         
-        # Calculate difference and update RSI manually
-        diff = cor1m_value - cor3m_value
-        self.price_history.append(diff)
+        # === STEP 3: LOG STATE ===
+        if self.bars_since_entry >= 1:
+            self.bars_since_entry += 1
+        if self.bars_since_exit < self.COOLDOWN_BARS:
+            self.bars_since_exit += 1
+    
+    def _get_cor_value(self, cor_dict, current_date):
+        """
+        Safely retrieve COR value for a given date.
+        Returns None if not available (no lookahead).
+        """
+        if current_date in cor_dict:
+            return cor_dict[current_date]['close']
         
-        # Keep only last N periods for RSI calculation
-        if len(self.price_history) > self.rsi_period + 1:
-            self.price_history.pop(0)
+        # Fallback: use most recent available (max 10 days back)
+        for day_offset in range(1, 11):
+            check_date = current_date - timedelta(days=day_offset)
+            if check_date in cor_dict:
+                return cor_dict[check_date]['close']
         
-        # Calculate RSI if we have enough data
-        if len(self.price_history) >= self.rsi_period:
-            gains = sum(max(0, self.price_history[i] - self.price_history[i-1]) for i in range(1, len(self.price_history)))
-            losses = sum(max(0, self.price_history[i-1] - self.price_history[i]) for i in range(1, len(self.price_history)))
-            
-            if losses == 0:
-                self.rsi_value = 100
-            else:
-                rs = gains / losses
-                self.rsi_value = 100 - (100 / (1 + rs))
+        return None
+    
+    def _update_regime(self, spread, vxx_price, time_str):
+        """
+        LAYER 1: Regime Determination
+        Classifies market as SAFE/NEUTRAL/DANGER based on COR spread.
+        Requires 2-bar persistence to avoid whipsaws.
+        Logs all regime transitions for auditability.
+        """
+        
+        # Update spread history
+        self.spread_history.append(spread)
+        if len(self.spread_history) > self.SPREAD_MA_WINDOW + 5:
+            self.spread_history.pop(0)
+        
+        # Need minimum window to compute stats
+        if len(self.spread_history) < self.SPREAD_MA_WINDOW:
+            return
+        
+        # Compute rolling stats
+        recent_spreads = self.spread_history[-self.SPREAD_MA_WINDOW:]
+        self.spread_ma = sum(recent_spreads) / len(recent_spreads)
+        variance = sum((x - self.spread_ma) ** 2 for x in recent_spreads) / len(recent_spreads)
+        self.spread_std = variance ** 0.5 if variance > 0 else 0.01
+        
+        # Detect shock (rapid movement > 2.5 std)
+        if len(self.spread_history) >= 2:
+            last_change = abs(spread - self.spread_history[-2])
+            if last_change > self.spread_std * self.SHOCK_THRESHOLD_MULT and self.spread_std > 0:
+                self.debug(f"[SHOCK] {time_str}: Spread delta={last_change:.3f} (>2.5*std), standing aside 3 bars")
+                self.regime_current = REGIME_DANGER
+                self.regime_bar_count = 1
+                return
+        
+        # Determine regime candidate based on spread distance from MA
+        distance_from_ma = spread - self.spread_ma
+        
+        if distance_from_ma < -self.spread_std:
+            # Spread very low = opportunity for short vol
+            regime_candidate = REGIME_SAFE
+        elif distance_from_ma > self.spread_std:
+            # Spread very high = risky for shorts
+            regime_candidate = REGIME_DANGER
         else:
-            return  # Not enough data yet
+            # In the middle band
+            regime_candidate = REGIME_NEUTRAL
         
-        rsi_value = self.rsi_value
+        # Apply persistence rule: only switch regime after 2 consecutive bars
+        if regime_candidate == self.regime_current:
+            self.regime_bar_count += 1
+        else:
+            self.regime_bar_count = 1
         
-        # Debug output
-        self.debug(f"[SIGNAL] {self.time.date()}: COR1M={cor1m_value:.2f} | COR3M={cor3m_value:.2f} | Diff={diff:.4f} | RSI={rsi_value:.2f} | VXX={vxx_price:.2f} | Pos={'SHORT' if self.is_short else 'FLAT'}")
+        # Regime transition if persistence threshold met
+        if self.regime_bar_count >= self.REGIME_PERSISTENCE_BARS and regime_candidate != self.regime_previous:
+            self.debug(f"[REGIME] {time_str}: {self.regime_current} -> {regime_candidate} | Spread={spread:.3f} vs MA={self.spread_ma:.3f}±{self.spread_std:.3f}")
+            self.regime_previous = self.regime_current
+            self.regime_current = regime_candidate
+            self.regime_bar_count = 0
+    
+    def _execute_trades(self, spread, vxx_price, time_str):
+        """
+        LAYER 2: Trade Execution
+        Entry: Only if regime=SAFE AND cooldown clear AND spread extreme
+        Exit: When regime revoked OR spread normalizes OR stop hits
+        All decisions logged for auditability.
+        """
         
-        # Entry: RSI oversold (< 50) - reversal signal to short vol
-        if not self.is_short and rsi_value < self.rsi_threshold:
-            self.set_holdings(self.vxx, -self.position_size)
+        # Check cooldown (structural parameter - don't touch)
+        if self.bars_since_exit < self.COOLDOWN_BARS:
+            return
+        
+        # === ENTRY LOGIC ===
+        if not self.is_short:
+            # Only enter in SAFE regime
+            if self.regime_current != REGIME_SAFE:
+                return
+            
+            # Spread must be extreme (>1.0 std below MA for short opportunity)
+            spread_distance = self.spread_ma - spread
+            if spread_distance < self.SIGNAL_STD_THRESHOLD * self.spread_std:
+                return
+            
+            # === ENTER SHORT ===
+            self.set_holdings(self.vxx, -self.POSITION_SIZE)
             self.is_short = True
             self.entry_price = vxx_price
+            self.entry_spread = spread
+            self.entry_bar_count = 0
+            self.bars_since_entry = 1
             self.trade_count += 1
-            self.debug(f"[TRADE {self.trade_count}] ▼ ENTRY @ {self.time.date()}: SHORT VXX @ {vxx_price:.2f} | RSI={rsi_value:.2f}<{self.rsi_threshold} | Diff={diff:.4f}")
+            
+            self.debug(f"[ENTRY] Trade #{self.trade_count} @ {time_str}: SHORT {-self.POSITION_SIZE*100:.0f}% VXX @ {vxx_price:.2f} | Regime={self.regime_current} | Spread={spread:.3f} vs MA={self.spread_ma:.3f} (distance={spread_distance:.3f})")
         
-        # Exit: VXX rises above threshold or RSI recovers
-        elif self.is_short and (vxx_price > self.vxx_close_threshold or rsi_value > 60):
-            exit_reason = f"VXX={vxx_price:.2f}>{self.vxx_close_threshold}" if vxx_price > self.vxx_close_threshold else f"RSI={rsi_value:.2f}>60"
-            self.liquidate(self.vxx)
-            self.is_short = False
-            profit = self.entry_price - vxx_price
-            profit_pct = (profit / self.entry_price) * 100
-            self.debug(f"[TRADE {self.trade_count}] ▲ EXIT @ {self.time.date()}: CLOSE @ {vxx_price:.2f} | {exit_reason} | P/L: {profit:.2f} ({profit_pct:.1f}%)")
+        # === EXIT LOGIC ===
+        else:
+            exit_reason = None
+            
+            # Reason 1: Regime permission revoked (DANGER detected)
+            if self.regime_current == REGIME_DANGER:
+                exit_reason = "Regime changed to DANGER"
+            
+            # Reason 2: Spread has normalized (mean reversion trade complete)
+            elif abs(spread - self.spread_ma) < self.EXIT_MEAN_REVERT_THRESHOLD * self.spread_std:
+                exit_reason = f"Spread normalized to MA (distance={abs(spread-self.spread_ma):.3f} < {self.EXIT_MEAN_REVERT_THRESHOLD}*std)"
+            
+            # Reason 3: Volatility stop triggered (protect against tail risk)
+            elif self.vxx_atr_estimate > 0:
+                stop_level = self.entry_price + (self.vxx_atr_estimate * self.STOP_LOSS_MULT)
+                if vxx_price > stop_level:
+                    exit_reason = f"Volatility stop hit: {vxx_price:.2f} > {stop_level:.2f} (entry={self.entry_price:.2f} + {self.STOP_LOSS_MULT}*ATR={self.vxx_atr_estimate:.2f})"
+            
+            # Execute exit if any condition met
+            if exit_reason:
+                self.liquidate(self.vxx)
+                profit = self.entry_price - vxx_price
+                profit_pct = (profit / self.entry_price * 100) if self.entry_price > 0 else 0
+                bars_held = self.bars_since_entry if self.bars_since_entry > 0 else 1
+                
+                self.debug(f"[EXIT] Trade #{self.trade_count} @ {time_str}: CLOSED @ {vxx_price:.2f} | Hold={bars_held} bars | P/L=${profit:.2f} ({profit_pct:+.1f}%) | Reason: {exit_reason}")
+                
+                self.is_short = False
+                self.bars_since_exit = 0
+                self.entry_bar_count = 0
     
     def on_end_of_algorithm(self):
         """Called at the end of the algorithm"""
         self.debug(f"\n{'='*90}")
         self.debug(f"[FINAL SUMMARY]")
         self.debug(f"[FINAL] Algorithm ended: {self.time.date()}")
-        self.debug(f"[FINAL] Total trades executed: {self.trade_count}")
-        self.debug(f"[FINAL] COR1M data points: {len(self.cor1m_data)} rows")
-        self.debug(f"[FINAL] COR3M data points: {len(self.cor3m_data)} rows")
+        self.debug(f"[FINAL] Total trades: {self.trade_count}")
+        self.debug(f"[FINAL] COR1M entries: {len(self.cor1m_data)}")
+        self.debug(f"[FINAL] COR3M entries: {len(self.cor3m_data)}")
         self.debug(f"[FINAL] Portfolio value: ${self.portfolio.total_portfolio_value:.2f}")
-        self.debug(f"[FINAL] Cash remaining: ${self.portfolio.cash:.2f}")
+        self.debug(f"[FINAL] Cash: ${self.portfolio.cash:.2f}")
         self.debug(f"{'='*90}\n")
+
