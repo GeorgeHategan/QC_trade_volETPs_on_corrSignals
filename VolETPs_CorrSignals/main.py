@@ -179,32 +179,52 @@ class VolETPsCorrSignals(QCAlgorithm):
         self.debug(summary_line)
     
     def _load_csv_data(self, data_name):
-        """Load CSV data from Object Store (cloud) or local file (local dev) - stores HOURLY data with datetime keys"""
+        """Load CSV data from Object Store, GitHub, or local file - stores HOURLY data with datetime keys"""
         hourly_data = {}
         daily_data = {}
         
         try:
             self.debug(f"[DATA LOAD] Loading {data_name} data...")
             
+            # Key formats and URLs to try
             object_store_key = f"{data_name}_data"
+            github_url = f"https://raw.githubusercontent.com/GeorgeHategan/QC_trade_volETPs_on_corrSignals/main/data/custom/{data_name}.csv"
             local_path = f"data/custom/{data_name}.csv"
             
             content = None
             
-            # Try Object Store first (for cloud compatibility)
+            # Method 1: Try Object Store
             try:
-                # Try to get file path - this returns a local path if key exists
-                file_path = self.object_store.get_file_path(object_store_key)
-                if os.path.exists(file_path):
-                    self.debug(f"[DATA LOAD] Found in Object Store via path: {file_path}")
-                    with open(file_path, 'r') as f:
-                        content = f.read()
-                    self.debug(f"[DATA LOAD] Read {len(content)} bytes from Object Store path")
+                self.debug(f"[DATA LOAD] Trying Object Store key: '{object_store_key}'")
+                if self.object_store.contains_key(object_store_key):
+                    self.debug(f"[DATA LOAD] Key FOUND in Object Store! Reading...")
+                    content = self.object_store.read(object_store_key)
+                    self.debug(f"[DATA LOAD] Read {len(content)} bytes from Object Store")
+                else:
+                    self.debug(f"[DATA LOAD] Key NOT found in Object Store")
             except Exception as e:
-                self.debug(f"[DATA LOAD] Object Store file path failed: {str(e)}")
-                content = None
+                self.debug(f"[DATA LOAD] Object Store error: {str(e)}")
             
-            # Fallback to local file if Object Store failed
+            # Method 2: Try GitHub download
+            if not content:
+                try:
+                    self.debug(f"[DATA LOAD] Trying GitHub: {github_url}")
+                    content = self.download(github_url)
+                    if content and len(content) > 100:
+                        self.debug(f"[DATA LOAD] Downloaded {len(content)} bytes from GitHub")
+                        # Cache in Object Store for next time
+                        try:
+                            self.object_store.save(object_store_key, content)
+                            self.debug(f"[DATA LOAD] Saved to Object Store: {object_store_key}")
+                        except:
+                            pass
+                    else:
+                        self.debug(f"[DATA LOAD] GitHub download failed or empty")
+                        content = None
+                except Exception as e:
+                    self.debug(f"[DATA LOAD] GitHub error: {str(e)}")
+            
+            # Method 3: Fallback to local file
             if not content:
                 if os.path.exists(local_path):
                     self.debug(f"[DATA LOAD] Using local file: {local_path}")
