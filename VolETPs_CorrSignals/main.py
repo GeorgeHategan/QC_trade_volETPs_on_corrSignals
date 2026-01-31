@@ -110,7 +110,10 @@ class VolETPsCorrSignals(QCAlgorithm):
         """Load minimal embedded fallback data for cloud compatibility"""
         # Sample data for testing - enough to verify the strategy works
         # Real production would load all 971 COR1M and 498 COR3M dates
-        sample_cor1m = {
+        # Format: date object keys with OHLC dictionary values (matching CSV format)
+        from datetime import date
+        
+        sample_cor1m_raw = {
             '2022-03-18': 42.12, '2022-03-21': 41.95, '2022-03-22': 42.33,
             '2022-03-23': 42.18, '2022-03-24': 41.67, '2022-03-25': 41.45,
             '2022-03-28': 41.82, '2022-03-29': 42.05, '2022-03-30': 42.42,
@@ -137,7 +140,7 @@ class VolETPsCorrSignals(QCAlgorithm):
             '2022-06-28': 55.45, '2022-06-29': 55.67, '2022-06-30': 55.89,
         }
         
-        sample_cor3m = {
+        sample_cor3m_raw = {
             '2022-03-18': 39.45, '2022-03-21': 39.28, '2022-03-22': 39.67,
             '2022-03-23': 39.52, '2022-03-24': 39.01, '2022-03-25': 38.79,
             '2022-03-28': 39.16, '2022-03-29': 39.39, '2022-03-30': 39.76,
@@ -164,9 +167,31 @@ class VolETPsCorrSignals(QCAlgorithm):
             '2022-06-28': 52.79, '2022-06-29': 53.01, '2022-06-30': 53.23,
         }
         
-        self.cor1m_data = sample_cor1m
-        self.cor3m_data = sample_cor3m
-        self.debug(f"[DATA LOAD] ✓ Loaded {len(sample_cor1m)} embedded COR1M and {len(sample_cor3m)} embedded COR3M entries")
+        # Convert string dates to date objects and create OHLC structure to match CSV format
+        self.cor1m_data = {}
+        self.cor3m_data = {}
+        
+        for date_str, close_val in sample_cor1m_raw.items():
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
+            # Add small variance to create OHLC from close price
+            self.cor1m_data[date_obj] = {
+                'close': close_val,
+                'open': close_val * 0.999,
+                'high': close_val * 1.001,
+                'low': close_val * 0.998
+            }
+        
+        for date_str, close_val in sample_cor3m_raw.items():
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
+            # Add small variance to create OHLC from close price
+            self.cor3m_data[date_obj] = {
+                'close': close_val,
+                'open': close_val * 0.999,
+                'high': close_val * 1.001,
+                'low': close_val * 0.998
+            }
+        
+        self.debug(f"[DATA LOAD] ✓ Loaded {len(self.cor1m_data)} embedded COR1M and {len(self.cor3m_data)} embedded COR3M entries")
 
     def on_data(self, data: Slice):
         """Main algorithm logic"""
