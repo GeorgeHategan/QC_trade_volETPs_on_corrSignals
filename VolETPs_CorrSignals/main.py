@@ -45,6 +45,14 @@ class VolETPsCorrSignals(QCAlgorithm):
         self.cor3m_data = {}
         
         self.debug("[INIT] Loading correlation data...")
+        
+        # Debug: List all Object Store keys
+        try:
+            all_keys = list(self.object_store.keys)
+            self.debug(f"[INIT] Object Store has {len(all_keys)} keys: {all_keys[:10]}")
+        except Exception as e:
+            self.debug(f"[INIT] Could not list Object Store keys: {str(e)}")
+        
         self._load_csv_data("cor1m")
         self._load_csv_data("cor3m")
         
@@ -178,24 +186,23 @@ class VolETPsCorrSignals(QCAlgorithm):
         try:
             self.debug(f"[DATA LOAD] Loading {data_name} data...")
             
-            # Try multiple key formats for Object Store
-            possible_keys = [f"{data_name}_data", f"/{data_name}_data", f"{data_name}.csv", f"/{data_name}.csv"]
+            object_store_key = f"{data_name}_data"
             local_path = f"data/custom/{data_name}.csv"
             
             content = None
             
             # Try Object Store first (for cloud compatibility)
-            for object_store_key in possible_keys:
-                try:
-                    self.debug(f"[DATA LOAD] Checking Object Store key: {object_store_key}")
-                    if self.object_store.contains_key(object_store_key):
-                        self.debug(f"[DATA LOAD] Found! Loading from Object Store: {object_store_key}")
-                        content = self.object_store.read(object_store_key)
-                        self.debug(f"[DATA LOAD] Read {len(content)} bytes from Object Store")
-                        break
-                except Exception as e:
-                    self.debug(f"[DATA LOAD] Key {object_store_key} failed: {str(e)}")
-                    continue
+            try:
+                # Try to get file path - this returns a local path if key exists
+                file_path = self.object_store.get_file_path(object_store_key)
+                if os.path.exists(file_path):
+                    self.debug(f"[DATA LOAD] Found in Object Store via path: {file_path}")
+                    with open(file_path, 'r') as f:
+                        content = f.read()
+                    self.debug(f"[DATA LOAD] Read {len(content)} bytes from Object Store path")
+            except Exception as e:
+                self.debug(f"[DATA LOAD] Object Store file path failed: {str(e)}")
+                content = None
             
             # Fallback to local file if Object Store failed
             if not content:
@@ -291,6 +298,13 @@ class VolETPsCorrSignals(QCAlgorithm):
         current_date = self.time.date()
         current_time_str = self.time.strftime("%Y-%m-%d %H:%M:%S")
         current_hour_iso = self.time.isoformat()
+        
+        # One-time log first bar for debugging
+        if not hasattr(self, '_first_bar_logged'):
+            self._first_bar_logged = True
+            self.debug(f"[FIRST BAR] Time: {current_time_str}, ISO: {current_hour_iso}")
+            self.debug(f"[FIRST BAR] COR1M has {len(self.cor1m_hourly_data)} entries")
+            self.debug(f"[FIRST BAR] COR3M has {len(self.cor3m_hourly_data)} entries")
         
         # Get COR values at HOURLY resolution (no lookahead: use only available data at current timestamp)
         cor1m_val = self._get_cor_value_hourly(self.cor1m_hourly_data, current_date, current_hour_iso)
