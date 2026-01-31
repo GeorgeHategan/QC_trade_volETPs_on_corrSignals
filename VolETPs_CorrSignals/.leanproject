@@ -1,0 +1,8 @@
+{
+  "name": "VolETPs_CorrSignals",
+  "description": "VIX short strategy using correlation signals",
+  "version": "1.0.0",
+  "author": "GeorgeHategan",
+  "includePaths": ["data/custom"],
+  "libraries": []
+}

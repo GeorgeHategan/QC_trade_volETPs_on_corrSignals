@@ -31,12 +31,35 @@ class VolETPsCorrSignals(QCAlgorithm):
         self.set_end_date(2022, 6, 30)
         self.set_cash(100000)
         
-        # Load CSV data into memory
-        self.cor1m_data = self._load_csv_data("data/custom/cor1m.csv")
-        self.cor3m_data = self._load_csv_data("data/custom/cor3m.csv")
+        # Load CSV data into memory - try multiple paths for local vs cloud
+        paths_to_try = [
+            "data/custom/cor1m.csv",
+            "../data/custom/cor1m.csv", 
+            "../../data/custom/cor1m.csv"
+        ]
         
-        self.debug(f"Loaded COR1M: {len(self.cor1m_data)} rows")
-        self.debug(f"Loaded COR3M: {len(self.cor3m_data)} rows")
+        self.cor1m_data = None
+        self.cor3m_data = None
+        
+        for path_prefix in paths_to_try:
+            cor1m_path = path_prefix.replace("cor1m.csv", "cor1m.csv")
+            cor3m_path = path_prefix.replace("cor1m.csv", "cor3m.csv")
+            
+            self.debug(f"[INIT] Trying to load from: {path_prefix}")
+            self.cor1m_data = self._load_csv_data(cor1m_path)
+            self.cor3m_data = self._load_csv_data(cor3m_path)
+            
+            if self.cor1m_data and len(self.cor1m_data) > 0:
+                self.debug(f"[INIT] ✓ Successfully loaded from: {path_prefix}")
+                break
+        
+        if not self.cor1m_data or len(self.cor1m_data) == 0:
+            self.debug(f"[INIT] ✗ FAILED to load CSV data from any path!")
+            self.cor1m_data = {}
+            self.cor3m_data = {}
+        
+        self.debug(f"[INIT] COR1M data: {len(self.cor1m_data)} rows")
+        self.debug(f"[INIT] COR3M data: {len(self.cor3m_data)} rows")
         
         # Add trading instrument
         self.vxx = self.add_equity("VXX", Resolution.DAILY).symbol
