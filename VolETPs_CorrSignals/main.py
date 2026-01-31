@@ -43,9 +43,8 @@ class VolETPsCorrSignals(QCAlgorithm):
         # Add trading instrument with HOUR resolution for intraday trading
         self.vxx = self.add_equity("VXX", Resolution.HOUR).symbol
         
-        # Add correlation signals as custom data with HOUR resolution
-        self.cor1m = self.add_data("COR1M", Resolution.HOUR).symbol
-        self.cor3m = self.add_data("COR3M", Resolution.HOUR).symbol
+        # Correlation data loaded from CSV/embedded - no need for separate data feeds
+        # Signals will be generated hourly based on loaded correlation data
         
         # Indicators
         self.rsi_diff = RelativeStrengthIndex(14)
