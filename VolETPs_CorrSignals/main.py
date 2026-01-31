@@ -333,27 +333,32 @@ class VolETPsCorrSignals(QCAlgorithm):
         Returns None if not available (no lookahead).
         First tries exact hour match, then falls back to most recent hour today,
         then falls back to previous day's last hour.
+        Note: CSV data has :30 minute timestamps (e.g., T14:30:00), so we check both :00 and :30
         """
         # Try exact hour match (e.g., "2026-01-30T15:00:00")
         if current_hour_iso in cor_hourly_dict:
             return cor_hourly_dict[current_hour_iso]['close']
         
         # Fallback: search for most recent available hour on current date
+        # Check both :00 and :30 minute marks since data uses :30
         current_date_str = current_date.isoformat()
         for hour in range(23, -1, -1):
-            check_hour_iso = f"{current_date_str}T{hour:02d}:00:00"
-            if check_hour_iso in cor_hourly_dict:
-                return cor_hourly_dict[check_hour_iso]['close']
+            # Check :30 first (matches our data format), then :00
+            for minute in [30, 0]:
+                check_hour_iso = f"{current_date_str}T{hour:02d}:{minute:02d}:00"
+                if check_hour_iso in cor_hourly_dict:
+                    return cor_hourly_dict[check_hour_iso]['close']
         
         # Fallback: use most recent available from previous days (max 10 days back)
         for day_offset in range(1, 11):
             check_date = current_date - timedelta(days=day_offset)
             check_date_str = check_date.isoformat()
-            # Look for last hour of that day (23:00)
+            # Look for last hour of that day
             for hour in range(23, -1, -1):
-                check_hour_iso = f"{check_date_str}T{hour:02d}:00:00"
-                if check_hour_iso in cor_hourly_dict:
-                    return cor_hourly_dict[check_hour_iso]['close']
+                for minute in [30, 0]:
+                    check_hour_iso = f"{check_date_str}T{hour:02d}:{minute:02d}:00"
+                    if check_hour_iso in cor_hourly_dict:
+                        return cor_hourly_dict[check_hour_iso]['close']
         
         return None
     
