@@ -1621,7 +1621,14 @@ class VolETPsCorrSignals(QCAlgorithm):
         if not data.contains_key(self.vxx):
             return
         
-        vxx_price = data[self.vxx].close
+        try:
+            vxx_data = data[self.vxx]
+            if vxx_data is None or vxx_data.close is None:
+                return
+            vxx_price = vxx_data.close
+        except:
+            return
+        
         current_date = self.time.date()
         
         # Get correlation data for today
