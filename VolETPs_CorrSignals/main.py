@@ -17,7 +17,8 @@ class VolETPsCorrSignals(QCAlgorithm):
     """
 
     def initialize(self):
-        self.set_start_date(2022, 3, 18)
+        # Start date must be after COR3M data availability (2024-02-06)
+        self.set_start_date(2024, 2, 6)
         self.set_end_date(2026, 1, 30)
         self.set_cash(100000)
         
